@@ -2751,6 +2751,67 @@ async def test_decode_warmup_matches_launch_server_order(record_text_warmup):
 
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
+async def test_decode_warmup_health_timeout_cancels_generation(
+    monkeypatch, record_text_warmup
+):
+    cancelled = asyncio.Event()
+
+    async def stalled_generate(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(init_llm_mod.envs.SGLANG_WARMUP_TIMEOUT, "get", lambda: 0.01)
+    engine = _decode_warmup_engine(record_text_warmup)
+    engine.async_generate = stalled_generate
+    task = asyncio.create_task(
+        init_llm_mod._warmup_decode_engine(engine, _decode_warmup_server_args())
+    )
+    try:
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done, "Health generation ignored the warmup deadline"
+        with pytest.raises(asyncio.TimeoutError):
+            await task
+        assert cancelled.is_set()
+        assert [name for name, _ in record_text_warmup] == ["warmup", "freeze_gc"]
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.parametrize(("configured", "expected"), [(7, 7), (0, 600), (-1, 600)])
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_health_timeout_policy(
+    monkeypatch, record_text_warmup, configured, expected
+):
+    timeouts = []
+    original_wait_for = asyncio.wait_for
+
+    async def observed_wait_for(awaitable, timeout):
+        timeouts.append(timeout)
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(
+        init_llm_mod.envs.SGLANG_WARMUP_TIMEOUT, "get", lambda: configured
+    )
+    monkeypatch.setattr(init_llm_mod.asyncio, "wait_for", observed_wait_for)
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(record_text_warmup), _decode_warmup_server_args()
+    )
+    assert timeouts == [expected]
+    assert [name for name, _ in record_text_warmup] == [
+        "warmup",
+        "freeze_gc",
+        "generate",
+    ]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
 async def test_decode_warmup_skip_server_warmup_still_freezes_gc(record_text_warmup):
     events = record_text_warmup
     await init_llm_mod._warmup_decode_engine(

@@ -141,8 +141,12 @@ async def _warmup_decode_engine(engine: sgl.Engine, server_args) -> None:
     # Freezes the tokenizer manager (this process), schedulers and detokenizer.
     await engine.tokenizer_manager.freeze_gc()
     if not server_args.skip_server_warmup:
-        await engine.async_generate(
-            input_ids=[0], sampling_params={"temperature": 0.0, "max_new_tokens": 1}
+        timeout = envs.SGLANG_WARMUP_TIMEOUT.get()
+        await asyncio.wait_for(
+            engine.async_generate(
+                input_ids=[0], sampling_params={"temperature": 0.0, "max_new_tokens": 1}
+            ),
+            timeout=timeout if timeout > 0 else 600,
         )
     logging.info("Engine warmup and GC freeze done in %.1fs", time.time() - started)
 
